@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: rastro
+    runtime: node
+    plan: free
+    buildCommand: npm run setup
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPER_EMAIL
+        sync: false
+      - key: SUPER_PASSWORD
+        sync: false
