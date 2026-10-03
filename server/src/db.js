@@ -9,9 +9,25 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
+let DB_URL = process.env.DATABASE_URL;
+try {
+  const u = new URL(DB_URL);
+  // Transaction pooler (6543) usa IPv6 e não funciona no Render grátis: troca para o Session pooler (5432).
+  if (/pooler\.supabase\.com$/i.test(u.hostname) && u.port === '6543') {
+    u.port = '5432';
+    DB_URL = u.toString();
+    console.log('Aviso: porta 6543 trocada para 5432 (Session pooler).');
+  }
+  console.log(`Banco: ${u.hostname}:${u.port || 5432} (usuário ${decodeURIComponent(u.username)})`);
+  if (/^db\.[a-z0-9]+\.supabase\.co$/i.test(u.hostname))
+    console.error('ATENÇÃO: esta é a conexão DIRETA do Supabase (só IPv6) e não funciona no Render. Use a "Session pooler" (host ...pooler.supabase.com).');
+} catch {
+  console.error('DATABASE_URL inválida. Se a senha tiver @ : / ? # troque a senha por uma só com letras e números.');
+}
+
 const local = /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL);
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: DB_URL,
   ssl: local ? false : { rejectUnauthorized: false },
   max: 5,
 });

@@ -3,7 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const { DATA_DIR } = require('./db');
 
-const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+// Aceita a URL com sufixos colados por engano (ex.: .../rest/v1/): usa só o endereço base.
+const SB_URL = (() => {
+  try { return process.env.SUPABASE_URL ? new URL(process.env.SUPABASE_URL).origin : ''; } catch { return ''; }
+})();
 const SB_KEY = process.env.SUPABASE_SERVICE_KEY || '';
 const BUCKET = process.env.SUPABASE_BUCKET || 'os-fotos';
 const useSupabase = !!(SB_URL && SB_KEY);
