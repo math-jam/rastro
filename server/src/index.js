@@ -140,6 +140,26 @@ app.post('/api/auth/change-password', auth, wrap(async (req, res) => {
 
 /* ---------- Empresas (somente dono do sistema) ---------- */
 // '' -> null (sem vencimento); data válida AAAA-MM-DD -> ela mesma; inválida -> false.
+// Mensalidade: "dia_vencimento" (1-31) repete todo mês; "vencimento" é a próxima data a pagar.
+const pad2 = (n) => String(n).padStart(2, '0');
+const dueOn = (y, m, day) => { // m pode passar de 12 (vira o ano); dia 31 cai no último dia do mês
+  const d = new Date(y, m - 1, 1);
+  const ny = d.getFullYear(), nm = d.getMonth() + 1;
+  return `${ny}-${pad2(nm)}-${pad2(Math.min(day, new Date(ny, nm, 0).getDate()))}`;
+};
+const todayBR = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+const nextDue = (day) => {
+  const t = todayBR();
+  const [y, m] = t.split('-').map(Number);
+  const cand = dueOn(y, m, day);
+  return cand >= t ? cand : dueOn(y, m + 1, day);
+};
+const parseDia = (v) => {
+  const s = str(v);
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isInteger(n) && n >= 1 && n <= 31 ? n : false;
+};
 const parseVenc = (v) => {
   const s = str(v);
   if (!s) return null;
@@ -167,13 +187,14 @@ app.post('/api/companies', superOnly, wrap(async (req, res) => {
     return res.status(409).json({ error: 'Já existe uma empresa com este CNPJ.' });
   if (await db.get('SELECT 1 FROM users WHERE lower(email)=?', [mail]))
     return res.status(409).json({ error: 'Já existe um usuário com este e-mail.' });
-  const venc = parseVenc(req.body.vencimento);
-  if (venc === false) return res.status(400).json({ error: 'Data de vencimento inválida.' });
+  const dia = parseDia(req.body.dia_vencimento);
+  if (dia === false) return res.status(400).json({ error: 'Dia de vencimento inválido (1 a 31).' });
+  const venc = dia ? nextDue(dia) : null;
   const id = await db.tx(async (t) => {
-    const c = await t.get(`INSERT INTO companies (nome_fantasia,razao_social,email,max_usuarios,cnpj,telefone,vencimento,${ADDR.join(',')})
-      VALUES (?,?,?,?,?,?,?,${ADDR.map(() => '?').join(',')}) RETURNING id`,
+    const c = await t.get(`INSERT INTO companies (nome_fantasia,razao_social,email,max_usuarios,cnpj,telefone,vencimento,dia_vencimento,${ADDR.join(',')})
+      VALUES (?,?,?,?,?,?,?,?,${ADDR.map(() => '?').join(',')}) RETURNING id`,
       [str(nome_fantasia), str(razao_social), mail, Math.max(1, parseInt(max_usuarios) || 1),
-        digits(req.body.cnpj), digits(req.body.telefone), venc, ...addrValues(req.body)]);
+        digits(req.body.cnpj), digits(req.body.telefone), venc, dia, ...addrValues(req.body)]);
     await t.run("INSERT INTO users (company_id,nome,email,senha_hash,role,must_change_password) VALUES (?,?,?,?, 'admin',1)",
       [c.id, str(razao_social), mail, bcrypt.hashSync(str(senha), 10)]);
     await audit(t, req, c.id, 'criou', 'empresa', c.id, str(nome_fantasia), { cnpj: digits(req.body.cnpj), max_usuarios: Math.max(1, parseInt(max_usuarios) || 1) });
@@ -194,13 +215,21 @@ app.put('/api/companies/:id', superOnly, wrap(async (req, res) => {
     await db.run(`UPDATE companies SET telefone=?,${ADDR.map((k) => k + '=?').join(',')} WHERE id=?`,
       [digits(req.body.telefone), ...addrValues(req.body), c.id]);
   }
-  if (req.body.vencimento !== undefined) {
-    const venc = parseVenc(req.body.vencimento);
-    if (venc === false) return res.status(400).json({ error: 'Data de vencimento inválida.' });
-    if (venc !== (c.vencimento || null)) {
-      await db.run('UPDATE companies SET vencimento=? WHERE id=?', [venc, c.id]);
-      await audit(db, req, c.id, 'editou', 'empresa', c.id, c.nome_fantasia, { vencimento: [c.vencimento || null, venc] });
+  if (req.body.dia_vencimento !== undefined) {
+    const dia = parseDia(req.body.dia_vencimento);
+    if (dia === false) return res.status(400).json({ error: 'Dia de vencimento inválido (1 a 31).' });
+    if (dia !== (c.dia_vencimento || null)) {
+      // Fatura já vencida e não paga continua cobrando a data antiga; senão recalcula a próxima.
+      const venc = dia && (!c.vencimento || c.vencimento >= todayBR()) ? nextDue(dia) : c.vencimento;
+      await db.run('UPDATE companies SET dia_vencimento=?, vencimento=? WHERE id=?', [dia, venc || null, c.id]);
+      await audit(db, req, c.id, 'editou', 'empresa', c.id, c.nome_fantasia, { dia_vencimento: [c.dia_vencimento || null, dia], vencimento: [c.vencimento || null, venc || null] });
     }
+  }
+  if (req.body.registrar_pagamento && c.vencimento) {
+    const [y, m, d] = c.vencimento.split('-').map(Number);
+    const novo = dueOn(y, m + 1, c.dia_vencimento || d);
+    await db.run('UPDATE companies SET vencimento=? WHERE id=?', [novo, c.id]);
+    await audit(db, req, c.id, 'editou', 'empresa', c.id, c.nome_fantasia, { pagamento: 'registrado', vencimento: [c.vencimento, novo] });
   }
   if (str(nova_senha).length >= 6)
     await db.run("UPDATE users SET senha_hash=?, must_change_password=1 WHERE company_id=? AND lower(email)=lower(?) AND role='admin'",

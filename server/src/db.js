@@ -125,6 +125,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_company ON audit_log (company_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log (entity, entity_id);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_by INTEGER;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS vencimento TEXT;
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS dia_vencimento INTEGER;
 CREATE TABLE IF NOT EXISTS login_codes (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   code_hash TEXT NOT NULL,

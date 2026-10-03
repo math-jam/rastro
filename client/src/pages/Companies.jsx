@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { addDias, api, diasPara, fmtDate } from '../api'
+import { api, diasPara, fmtDate } from '../api'
 import { cnpjValido, maskCep, maskCnpj, maskTel, onlyDigits } from '../cnpj'
 
 const empty = {
-  nome_fantasia: '', razao_social: '', cnpj: '', telefone: '', email: '', senha: '', max_usuarios: 5, vencimento: '',
+  nome_fantasia: '', razao_social: '', cnpj: '', telefone: '', email: '', senha: '', max_usuarios: 5, dia_vencimento: '',
   cep: '', logradouro: '', numero: '', complemento: '', bairro: '', cidade: '', uf: '',
 }
 
@@ -70,7 +70,12 @@ export default function Companies() {
     if (c.ativo && !confirm(`Bloquear a conta de ${c.nome_fantasia}? Ninguém da empresa conseguirá entrar até você desbloquear.`)) return
     update(c, { ativo: !c.ativo })
   }
-  const setVenc = (c, vencimento) => update(c, { vencimento })
+  const setDia = (c, v) => {
+    if (v === '' || (+v >= 1 && +v <= 31)) update(c, { dia_vencimento: v })
+  }
+  const pagar = (c) => {
+    if (confirm(`Registrar pagamento de ${c.nome_fantasia}? O vencimento avança para o próximo mês.`)) update(c, { registrar_pagamento: true })
+  }
   const changeMax = (c) => {
     const v = prompt('Quantidade máxima de funcionários:', c.max_usuarios)
     if (v && +v > 0) update(c, { max_usuarios: +v })
@@ -102,7 +107,7 @@ export default function Companies() {
           <label className="field"><span>E-mail (será o login)</span><input type="email" required value={f.email} onChange={set('email')} /></label>
           <label className="field"><span>Senha provisória</span><input required minLength={6} value={f.senha} onChange={set('senha')} /></label>
           <label className="field"><span>Máx. de funcionários</span><input type="number" min="1" required value={f.max_usuarios} onChange={set('max_usuarios')} /></label>
-          <label className="field"><span>Vencimento da fatura</span><input type="date" value={f.vencimento} onChange={set('vencimento')} /></label>
+          <label className="field"><span>Dia do vencimento (todo mês)</span><input type="number" min="1" max="31" placeholder="Ex.: 10" value={f.dia_vencimento} onChange={set('dia_vencimento')} /></label>
           <div className="form-actions"><button className="btn primary" disabled={busy}>Cadastrar empresa</button></div>
         </form>
       )}
@@ -125,13 +130,13 @@ export default function Companies() {
                 <span className="chip">Funcionários: {c.usuarios_ativos}/{c.max_usuarios}</span>
                 <span className="chip">OSs: {c.total_os}</span>
                 <span className={`chip due ${vcls}`}>
-                  {dias == null ? 'Sem vencimento' : `Vence ${fmtDate(c.vencimento)}${dias < 0 ? ` (vencida há ${-dias}d)` : dias === 0 ? ' (hoje)' : ` (em ${dias}d)`}`}
+                  {dias == null ? 'Sem vencimento' : `Dia ${c.dia_vencimento} · Vence ${fmtDate(c.vencimento)}${dias < 0 ? ` (vencida há ${-dias}d)` : dias === 0 ? ' (hoje)' : ` (em ${dias}d)`}`}
                 </span>
               </div>
               <div className="row-gap due-edit">
-                <input type="date" aria-label="Vencimento da fatura" value={c.vencimento || ''} onChange={(e) => setVenc(c, e.target.value)} />
-                <button className="btn sm" title="Soma 30 dias ao vencimento (ou a partir de hoje, se já venceu)"
-                  onClick={() => setVenc(c, addDias(dias != null && dias >= 0 ? c.vencimento : '', 30))}>+30 dias</button>
+                <input type="number" min="1" max="31" placeholder="Dia" aria-label="Dia do vencimento" defaultValue={c.dia_vencimento || ''}
+                  key={c.dia_vencimento} onBlur={(e) => e.target.value !== String(c.dia_vencimento || '') && setDia(c, e.target.value)} />
+                <button className="btn sm" disabled={!c.vencimento} onClick={() => pagar(c)}>Registrar pagamento</button>
               </div>
             </div>
             <div className="item-actions">
