@@ -59,3 +59,18 @@ export const fmtDateTime = (s) => {
   const [d, t = ''] = s.split(' ')
   return `${fmtDate(d)} ${t.slice(0, 5)}`
 }
+
+// Dias até a data AAAA-MM-DD (negativo = vencida). Compara só datas, no fuso local.
+export const diasPara = (s) => {
+  if (!s) return null
+  const [y, m, d] = s.slice(0, 10).split('-').map(Number)
+  const hoje = new Date()
+  return Math.round((new Date(y, m - 1, d) - new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate())) / 86400000)
+}
+
+export const addDias = (s, n) => {
+  const [y, m, d] = (s || '').slice(0, 10).split('-').map(Number)
+  const base = s ? new Date(y, m - 1, d) : new Date()
+  base.setDate(base.getDate() + n)
+  return `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-${String(base.getDate()).padStart(2, '0')}`
+}

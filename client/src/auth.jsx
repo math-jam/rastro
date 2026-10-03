@@ -23,13 +23,22 @@ export function AuthProvider({ children }) {
     }
   }, [logout])
 
-  const login = async (email, senha) => {
-    const r = await api('/auth/login', { method: 'POST', body: { email, senha } })
+  const finish = (r) => {
     setToken(r.token)
     setUser(r.user)
   }
 
+  // Devolve { challenge, email } quando o servidor pede o código enviado por e-mail.
+  const login = async (email, senha) => {
+    const r = await api('/auth/login', { method: 'POST', body: { email, senha } })
+    if (r.need_code) return { challenge: r.challenge, email: r.email }
+    finish(r)
+    return null
+  }
+  const verifyCode = async (challenge, code) => finish(await api('/auth/verify-code', { method: 'POST', body: { challenge, code } }))
+  const resendCode = (challenge) => api('/auth/resend-code', { method: 'POST', body: { challenge } })
+
   const refresh = () => api('/auth/me').then(setUser)
 
-  return <Ctx.Provider value={{ user, loading, login, logout, refresh }}>{children}</Ctx.Provider>
+  return <Ctx.Provider value={{ user, loading, login, verifyCode, resendCode, logout, refresh }}>{children}</Ctx.Provider>
 }

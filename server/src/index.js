@@ -6,7 +6,8 @@ const path = require('path');
 const fs = require('fs');
 const { db, init: initDb, NOW } = require('./db');
 const storage = require('./storage');
-const { sign, auth, requireRole, publicUser } = require('./auth');
+const { sign, signChallenge, verifyChallenge, auth, requireRole, publicUser } = require('./auth');
+const mail = require('./mail');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -59,15 +60,71 @@ async function audit(conn, req, companyId, action, entity, entityId, label, deta
 }
 
 /* ---------- Auth ---------- */
+// Verificação em 2 etapas: código de 6 dígitos por e-mail (ativa quando o envio de e-mail está configurado).
+const TWOFA = mail.enabled && process.env.TWOFA_DISABLED !== '1';
+if (!TWOFA) console.log('Aviso: verificação em 2 etapas DESATIVADA (defina MAIL_FROM e BREVO_API_KEY ou RESEND_API_KEY).');
+const hashCode = (uid, code) => crypto.createHash('sha256').update(`${uid}:${code}:${process.env.JWT_SECRET || ''}`).digest('hex');
+const maskEmail = (e) => e.replace(/^(.).*(@.*)$/, '$1***$2');
+const USER_SQL = `SELECT u.*, c.ativo AS empresa_ativa, c.nome_fantasia AS empresa_nome, c.vencimento AS empresa_vencimento
+  FROM users u LEFT JOIN companies c ON c.id = u.company_id`;
+const blockedMsg = (u) =>
+  !u.ativo || (u.role !== 'super' && !u.empresa_ativa) ? 'Conta bloqueada. Fale com o administrador do sistema.' : null;
+
+async function sendCode(u) {
+  const prev = await db.get('SELECT sent_at FROM login_codes WHERE user_id=?', [u.id]);
+  if (prev && Date.now() - Number(prev.sent_at) < 30000)
+    throw Object.assign(new Error('Aguarde 30 segundos para pedir outro código.'), { status: 429 });
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  await db.run(`INSERT INTO login_codes (user_id,code_hash,expires_at,sent_at,attempts) VALUES (?,?,?,?,0)
+    ON CONFLICT (user_id) DO UPDATE SET code_hash=EXCLUDED.code_hash, expires_at=EXCLUDED.expires_at, sent_at=EXCLUDED.sent_at, attempts=0`,
+    [u.id, hashCode(u.id, code), Date.now() + 10 * 60000, Date.now()]);
+  await mail.sendMail({
+    to: u.email, subject: `RASTRO: seu código de acesso é ${code}`,
+    text: `Seu código de verificação do RASTRO: ${code}\n\nVálido por 10 minutos. Se não foi você, ignore este e-mail e troque sua senha.`,
+  });
+}
+const sendErr = (res, e) => {
+  console.error(e.message);
+  return res.status(e.status || 502).json({ error: e.status ? e.message : 'Não foi possível enviar o código por e-mail. Tente novamente.' });
+};
+const challengeUser = (req) => { try { return verifyChallenge(req.body.challenge); } catch { return null; } };
+
 app.post('/api/auth/login', wrap(async (req, res) => {
-  const email = str(req.body.email).toLowerCase();
-  const u = await db.get(`SELECT u.*, c.ativo AS empresa_ativa, c.nome_fantasia AS empresa_nome
-    FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE lower(u.email) = ?`, [email]);
+  const u = await db.get(`${USER_SQL} WHERE lower(u.email) = ?`, [str(req.body.email).toLowerCase()]);
   if (!u || !bcrypt.compareSync(str(req.body.senha), u.senha_hash))
     return res.status(401).json({ error: 'E-mail ou senha incorretos.' });
-  if (!u.ativo || (u.role !== 'super' && !u.empresa_ativa))
-    return res.status(403).json({ error: 'Acesso desativado. Fale com o administrador.' });
+  const blocked = blockedMsg(u);
+  if (blocked) return res.status(403).json({ error: blocked });
+  if (!TWOFA) return res.json({ token: sign(u), user: publicUser(u) });
+  try { await sendCode(u); } catch (e) { return sendErr(res, e); }
+  res.json({ need_code: true, challenge: signChallenge(u), email: maskEmail(u.email) });
+}));
+
+app.post('/api/auth/verify-code', wrap(async (req, res) => {
+  const uid = challengeUser(req);
+  if (!uid) return res.status(401).json({ error: 'Login expirado. Entre novamente.' });
+  const u = await db.get(`${USER_SQL} WHERE u.id = ?`, [uid]);
+  const row = u && await db.get('SELECT * FROM login_codes WHERE user_id=?', [uid]);
+  if (!row || Number(row.expires_at) < Date.now()) return res.status(401).json({ error: 'Código expirado. Entre novamente.' });
+  const blocked = blockedMsg(u);
+  if (blocked) return res.status(403).json({ error: blocked });
+  if (row.attempts >= 5) return res.status(429).json({ error: 'Muitas tentativas. Entre novamente para receber outro código.' });
+  const given = Buffer.from(hashCode(uid, str(req.body.code).replace(/\D/g, '')));
+  const want = Buffer.from(row.code_hash);
+  if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) {
+    await db.run('UPDATE login_codes SET attempts = attempts + 1 WHERE user_id=?', [uid]);
+    return res.status(401).json({ error: 'Código incorreto.' });
+  }
+  await db.run('DELETE FROM login_codes WHERE user_id=?', [uid]);
   res.json({ token: sign(u), user: publicUser(u) });
+}));
+
+app.post('/api/auth/resend-code', wrap(async (req, res) => {
+  const uid = challengeUser(req);
+  const u = uid && await db.get(`${USER_SQL} WHERE u.id = ?`, [uid]);
+  if (!u || blockedMsg(u)) return res.status(401).json({ error: 'Login expirado. Entre novamente.' });
+  try { await sendCode(u); } catch (e) { return sendErr(res, e); }
+  res.json({ ok: true });
 }));
 
 app.get('/api/auth/me', auth, (req, res) => res.json(publicUser(req.user)));
@@ -82,6 +139,12 @@ app.post('/api/auth/change-password', auth, wrap(async (req, res) => {
 }));
 
 /* ---------- Empresas (somente dono do sistema) ---------- */
+// '' -> null (sem vencimento); data válida AAAA-MM-DD -> ela mesma; inválida -> false.
+const parseVenc = (v) => {
+  const s = str(v);
+  if (!s) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s)) ? s : false;
+};
 const superOnly = [auth, requireRole('super')];
 
 app.get('/api/companies', superOnly, wrap(async (_, res) => {
@@ -104,11 +167,13 @@ app.post('/api/companies', superOnly, wrap(async (req, res) => {
     return res.status(409).json({ error: 'Já existe uma empresa com este CNPJ.' });
   if (await db.get('SELECT 1 FROM users WHERE lower(email)=?', [mail]))
     return res.status(409).json({ error: 'Já existe um usuário com este e-mail.' });
+  const venc = parseVenc(req.body.vencimento);
+  if (venc === false) return res.status(400).json({ error: 'Data de vencimento inválida.' });
   const id = await db.tx(async (t) => {
-    const c = await t.get(`INSERT INTO companies (nome_fantasia,razao_social,email,max_usuarios,cnpj,telefone,${ADDR.join(',')})
-      VALUES (?,?,?,?,?,?,${ADDR.map(() => '?').join(',')}) RETURNING id`,
+    const c = await t.get(`INSERT INTO companies (nome_fantasia,razao_social,email,max_usuarios,cnpj,telefone,vencimento,${ADDR.join(',')})
+      VALUES (?,?,?,?,?,?,?,${ADDR.map(() => '?').join(',')}) RETURNING id`,
       [str(nome_fantasia), str(razao_social), mail, Math.max(1, parseInt(max_usuarios) || 1),
-        digits(req.body.cnpj), digits(req.body.telefone), ...addrValues(req.body)]);
+        digits(req.body.cnpj), digits(req.body.telefone), venc, ...addrValues(req.body)]);
     await t.run("INSERT INTO users (company_id,nome,email,senha_hash,role,must_change_password) VALUES (?,?,?,?, 'admin',1)",
       [c.id, str(razao_social), mail, bcrypt.hashSync(str(senha), 10)]);
     await audit(t, req, c.id, 'criou', 'empresa', c.id, str(nome_fantasia), { cnpj: digits(req.body.cnpj), max_usuarios: Math.max(1, parseInt(max_usuarios) || 1) });
@@ -128,6 +193,14 @@ app.put('/api/companies/:id', superOnly, wrap(async (req, res) => {
     if (digits(req.body.telefone).length < 10) return res.status(400).json({ error: 'Telefone inválido (com DDD).' });
     await db.run(`UPDATE companies SET telefone=?,${ADDR.map((k) => k + '=?').join(',')} WHERE id=?`,
       [digits(req.body.telefone), ...addrValues(req.body), c.id]);
+  }
+  if (req.body.vencimento !== undefined) {
+    const venc = parseVenc(req.body.vencimento);
+    if (venc === false) return res.status(400).json({ error: 'Data de vencimento inválida.' });
+    if (venc !== (c.vencimento || null)) {
+      await db.run('UPDATE companies SET vencimento=? WHERE id=?', [venc, c.id]);
+      await audit(db, req, c.id, 'editou', 'empresa', c.id, c.nome_fantasia, { vencimento: [c.vencimento || null, venc] });
+    }
   }
   if (str(nova_senha).length >= 6)
     await db.run("UPDATE users SET senha_hash=?, must_change_password=1 WHERE company_id=? AND lower(email)=lower(?) AND role='admin'",

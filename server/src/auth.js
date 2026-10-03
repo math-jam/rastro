@@ -19,12 +19,21 @@ const SECRET = getSecret();
 
 const sign = (u) => jwt.sign({ id: u.id }, SECRET, { expiresIn: '12h' });
 
+// Etapa intermediária do login com código por e-mail: este token NÃO serve como sessão.
+const signChallenge = (u) => jwt.sign({ id: u.id, p: '2fa' }, SECRET, { expiresIn: '10m' });
+const verifyChallenge = (t) => {
+  const d = jwt.verify(String(t || ''), SECRET);
+  if (d.p !== '2fa') throw new Error('token inválido');
+  return d.id;
+};
+
 // Sempre relê o usuário no banco: desativação/troca de papel vale imediatamente.
 async function auth(req, res, next) {
   const h = req.headers.authorization || '';
   try {
-    const { id } = jwt.verify(h.replace('Bearer ', ''), SECRET);
-    const u = await db.get(`SELECT u.*, c.ativo AS empresa_ativa, c.nome_fantasia AS empresa_nome
+    const { id, p } = jwt.verify(h.replace('Bearer ', ''), SECRET);
+    if (p) throw new Error();
+    const u = await db.get(`SELECT u.*, c.ativo AS empresa_ativa, c.nome_fantasia AS empresa_nome, c.vencimento AS empresa_vencimento
       FROM users u LEFT JOIN companies c ON c.id = u.company_id WHERE u.id = ?`, [id]);
     if (!u || !u.ativo || (u.role !== 'super' && !u.empresa_ativa)) throw new Error();
     req.user = u;
@@ -39,7 +48,7 @@ const requireRole = (...roles) => (req, res, next) =>
 
 const publicUser = (u) => ({
   id: u.id, nome: u.nome, email: u.email, role: u.role, company_id: u.company_id,
-  empresa_nome: u.empresa_nome || null, must_change_password: !!u.must_change_password,
+  empresa_nome: u.empresa_nome || null, empresa_vencimento: u.empresa_vencimento || null, must_change_password: !!u.must_change_password,
 });
 
-module.exports = { sign, auth, requireRole, publicUser };
+module.exports = { sign, signChallenge, verifyChallenge, auth, requireRole, publicUser };
