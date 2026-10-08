@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Link } from 'react-router-dom'
-import { api, compressImage, fmtDateTime } from '../api'
+import { api, compressImage, fmtDateTime, fmtNum } from '../api'
+import { parseKmz, reverseGeocode } from '../kmz'
 
 const today = () => new Date().toLocaleDateString('sv-SE') // AAAA-MM-DD no fuso local
 
@@ -48,6 +49,8 @@ export default function OrderForm() {
   const [gps, setGps] = useState('')
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(editing)
+  const [kmzItems, setKmzItems] = useState(null) // itens do KMZ aguardando seleção
+  const [kmzMsg, setKmzMsg] = useState('')
 
   useEffect(() => {
     if (!editing) return
@@ -86,6 +89,48 @@ export default function OrderForm() {
     )
   }
 
+  const openKmz = async (file) => {
+    setKmzMsg('')
+    try {
+      setKmzItems(parseKmz(await file.arrayBuffer(), file.name))
+    } catch (er) {
+      setKmzMsg(er.message || 'Não foi possível ler o arquivo.')
+    }
+  }
+
+  // Aplica o item escolhido: coordenadas, data, área, fotos (1ª = antes, 2ª = depois) e endereço.
+  const applyKmz = async (it) => {
+    setKmzItems(null)
+    setF((x) => ({
+      ...x,
+      coordenadas: `${it.lat.toFixed(6)}, ${it.lon.toFixed(6)}`,
+      ...(it.data && { abertura: it.data }),
+      ...(it.area != null && { tamanho_m: it.area.toFixed(2).replace('.', ',') }),
+    }))
+    setPicked((p) => {
+      const n = { ...p }
+      ;['antes', 'depois'].forEach((tipo, i) => {
+        const ph = it.photos[i]
+        if (!ph) return
+        if (n[tipo]) URL.revokeObjectURL(n[tipo].preview)
+        n[tipo] = { file: ph.file, preview: URL.createObjectURL(ph.file) }
+      })
+      return n
+    })
+    it.photos.forEach((ph) => URL.revokeObjectURL(ph.preview))
+    setKmzMsg('Buscando endereço…')
+    const a = await reverseGeocode(it.lat, it.lon)
+    if (a) {
+      setF((x) => ({ ...x, ...Object.fromEntries(Object.entries(a).filter(([, v]) => v)) }))
+      setKmzMsg('Item importado. Confira o endereço, que é aproximado.')
+    } else setKmzMsg('Item importado. Não foi possível buscar o endereço; preencha manualmente.')
+  }
+
+  const closeKmz = () => {
+    kmzItems?.forEach((it) => it.photos.forEach((ph) => URL.revokeObjectURL(ph.preview)))
+    setKmzItems(null)
+  }
+
   const submit = async (e) => {
     e.preventDefault()
     setBusy(true)
@@ -122,6 +167,14 @@ export default function OrderForm() {
           )}</div>
       </div>
 
+      <section className="card row-gap kmz-bar">
+        <label className="btn">
+          📂 Importar KMZ
+          <input type="file" accept=".kmz,.kml" hidden onChange={(e) => { e.target.files[0] && openKmz(e.target.files[0]); e.target.value = '' }} />
+        </label>
+        <small className="muted">{kmzMsg || 'Escolha um item do arquivo para preencher a OS automaticamente.'}</small>
+      </section>
+
       <section className="card grid-form">
         <h2 className="section-title full">Local do serviço</h2>
         <label className="field full"><span>Logradouro</span><input required value={f.logradouro} onChange={set('logradouro')} placeholder="Avenida Vitor Alves Pereira" /></label>
@@ -155,6 +208,29 @@ export default function OrderForm() {
             onPick={(file) => pick(tipo, file)} onClear={() => clear(tipo)} />
         ))}
       </section>
+
+      {kmzItems && (
+        <div className="modal-back" onClick={closeKmz}>
+          <div className="card modal kmz-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Selecione o item do KMZ</h2>
+            <div className="kmz-list">
+              {kmzItems.map((it, i) => (
+                <button type="button" key={i} className="kmz-item" onClick={() => applyKmz(it)}>
+                  <div className="kmz-thumbs">
+                    {it.photos.slice(0, 2).map((ph) => <img key={ph.name} src={ph.preview} alt="" />)}
+                  </div>
+                  <div className="kmz-meta">
+                    <strong>Item {it.nome}</strong>
+                    <span>{it.area != null ? `${fmtNum(it.area)} m²` : 'Ponto'}{it.data ? ` · ${it.data.split('-').reverse().join('/')}` : ''}</span>
+                    <span className="muted">{it.lat.toFixed(5)}, {it.lon.toFixed(5)} · {it.photos.length} foto(s)</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+            <button type="button" className="btn" onClick={closeKmz}>Cancelar</button>
+          </div>
+        </div>
+      )}
 
       {err && <div className="alert error">{err}</div>}
       <div className="sticky-actions">

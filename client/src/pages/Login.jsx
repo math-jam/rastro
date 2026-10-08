@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAuth } from '../auth.jsx'
+import { BUILD } from '../version'
 
 export default function Login() {
   const { login, verifyCode, resendCode } = useAuth()
@@ -10,6 +11,11 @@ export default function Login() {
   const [erro, setErro] = useState('')
   const [info, setInfo] = useState('')
   const [busy, setBusy] = useState(false)
+  const [backBuild, setBackBuild] = useState('…')
+
+  useEffect(() => {
+    fetch('/api/version').then((r) => r.json()).then((d) => setBackBuild(d.build || '?')).catch(() => setBackBuild('?'))
+  }, [])
 
   const submit = async (e) => {
     e.preventDefault()
@@ -48,6 +54,7 @@ export default function Login() {
 
   return (
     <div className="login-wrap">
+      <div className="build-info">F: {BUILD} · B: {backBuild}</div>
       <form className="card login-card" onSubmit={submit}>
         <div className="login-head">
           <img className="login-logo" src="/rastro-logo.png" alt="RASTRO" />

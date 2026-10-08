@@ -8,6 +8,7 @@ const { db, init: initDb, NOW } = require('./db');
 const storage = require('./storage');
 const { sign, signChallenge, verifyChallenge, auth, requireRole, publicUser } = require('./auth');
 const mail = require('./mail');
+const { BUILD } = require('./version');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -475,6 +476,7 @@ app.get('/api/audit', auth, requireRole('admin', 'super'), wrap(async (req, res)
 }));
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
+app.get('/api/version', (_, res) => res.json({ build: BUILD }));
 app.use('/api', (_, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
 
 /* ---------- Front-end (build do React) ---------- */
